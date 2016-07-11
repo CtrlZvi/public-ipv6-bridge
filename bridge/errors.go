@@ -5,6 +5,13 @@ import (
 	"net"
 )
 
+// ErrInvalidDriverConfig error is returned when Bridge Driver is passed an invalid config
+type ErrInvalidDriverConfig struct{}
+
+func (eidc *ErrInvalidDriverConfig) Error() string {
+	return "Invalid configuration passed to Bridge Driver"
+}
+
 // ErrNoIPAddr error is returned when bridge has no IPv4 address configured.
 type ErrNoIPAddr struct{}
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netutils"
 )
@@ -13,6 +14,50 @@ const (
 	DockerChain    = "DOCKER-PUBLIC-IPV6"
 	IsolationChain = "DOCKER-PUBLIC-IPV6-ISOLATION"
 )
+
+func setupIPChains(config *configuration) (*iptables.ChainInfo, *iptables.ChainInfo, *iptables.ChainInfo, error) {
+	// Sanity check.
+	if config.EnableIPTables == false {
+		return nil, nil, nil, fmt.Errorf("cannot create new chains, EnableIPTable is disabled")
+	}
+
+	hairpinMode := !config.EnableUserlandProxy
+
+	natChain, err := iptables.NewChain(DockerChain, iptables.Nat, hairpinMode)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create NAT chain: %v", err)
+	}
+	defer func() {
+		if err != nil {
+			if err := iptables.RemoveExistingChain(DockerChain, iptables.Nat); err != nil {
+				logrus.Warnf("failed on removing iptables NAT chain on cleanup: %v", err)
+			}
+		}
+	}()
+
+	filterChain, err := iptables.NewChain(DockerChain, iptables.Filter, false)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create FILTER chain: %v", err)
+	}
+	defer func() {
+		if err != nil {
+			if err := iptables.RemoveExistingChain(DockerChain, iptables.Filter); err != nil {
+				logrus.Warnf("failed on removing iptables FILTER chain on cleanup: %v", err)
+			}
+		}
+	}()
+
+	isolationChain, err := iptables.NewChain(IsolationChain, iptables.Filter, false)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create FILTER isolation chain: %v", err)
+	}
+
+	if err := addReturnRule(IsolationChain); err != nil {
+		return nil, nil, nil, err
+	}
+
+	return natChain, filterChain, isolationChain, nil
+}
 
 func (n *bridgeNetwork) setupIPTables(config *networkConfiguration, i *bridgeInterface) error {
 	d := n.driver
@@ -240,6 +285,24 @@ func setINC(iface1, iface2 string, enable bool) error {
 	return nil
 }
 
+func addReturnRule(chain string) error {
+	var (
+		table = iptables.Filter
+		args  = []string{"-j", "RETURN"}
+	)
+
+	if iptables.Exists(table, chain, args...) {
+		return nil
+	}
+
+	err := iptables.RawCombinedOutput(append([]string{"-I", chain}, args...)...)
+	if err != nil {
+		return fmt.Errorf("unable to add return rule in %s chain: %s", chain, err.Error())
+	}
+
+	return nil
+}
+
 // Ensure the jump rule is on top
 func ensureJumpRule(fromChain, toChain string) error {
 	var (
@@ -260,6 +323,18 @@ func ensureJumpRule(fromChain, toChain string) error {
 	}
 
 	return nil
+}
+
+func removeIPChains() {
+	for _, chainInfo := range []iptables.ChainInfo{
+		{Name: DockerChain, Table: iptables.Nat},
+		{Name: DockerChain, Table: iptables.Filter},
+		{Name: IsolationChain, Table: iptables.Filter},
+	} {
+		if err := chainInfo.Remove(); err != nil {
+			logrus.Warnf("Failed to remove existing iptables entries in table %s chain %s : %v", chainInfo.Table, chainInfo.Name, err)
+		}
+	}
 }
 
 func setupInternalNetworkRules(bridgeIface string, addr net.Addr, insert bool) error {

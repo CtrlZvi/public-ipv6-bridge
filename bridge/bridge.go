@@ -3,7 +3,10 @@ package bridge
 import (
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Sirupsen/logrus"
@@ -16,6 +19,10 @@ import (
 	"github.com/docker/libnetwork/portmapper"
 	"github.com/docker/libnetwork/types"
 	"github.com/vishvananda/netlink"
+)
+
+const (
+	networkType = "public-ipv6-bridge"
 )
 
 const (
@@ -104,6 +111,31 @@ type driver struct {
 // New constructs a new bridge driver
 func newDriver() *driver {
 	return &driver{networks: map[string]*bridgeNetwork{}, config: &configuration{}}
+}
+
+// Init registers a new instance of bridge driver
+func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
+	if _, err := os.Stat("/proc/sys/net/bridge"); err != nil {
+		if out, err := exec.Command("modprobe", "-va", "bridge", "br_netfilter").CombinedOutput(); err != nil {
+			logrus.Warnf("Running modprobe bridge br_netfilter failed with message: %s, error: %v", out, err)
+		}
+	}
+	if out, err := exec.Command("modprobe", "-va", "nf_nat").CombinedOutput(); err != nil {
+		logrus.Warnf("Running modprobe nf_nat failed with message: `%s`, error: %v", strings.TrimSpace(string(out)), err)
+	}
+	if err := iptables.FirewalldInit(); err != nil {
+		logrus.Debugf("Fail to initialize firewalld: %v, using raw iptables instead", err)
+	}
+
+	d := newDriver()
+	if err := d.configure(config); err != nil {
+		return err
+	}
+
+	c := driverapi.Capability{
+		DataScope: datastore.LocalScope,
+	}
+	return dc.RegisterDriver(networkType, d, c)
 }
 
 // Validate performs a static validation on the network configuration parameters.
@@ -282,6 +314,63 @@ func (c *networkConfiguration) conflictsWithNetworks(id string, others []*bridge
 				return types.ForbiddenErrorf("conflicts with network %s (%s) by ip network", nwID, nwConfig.BridgeName)
 			}
 		}
+	}
+
+	return nil
+}
+
+func (d *driver) configure(option map[string]interface{}) error {
+	var (
+		config         *configuration
+		err            error
+		natChain       *iptables.ChainInfo
+		filterChain    *iptables.ChainInfo
+		isolationChain *iptables.ChainInfo
+	)
+
+	genericData, ok := option[netlabel.GenericData]
+	if !ok || genericData == nil {
+		return nil
+	}
+
+	switch opt := genericData.(type) {
+	case options.Generic:
+		opaqueConfig, err := options.GenerateFromModel(opt, &configuration{})
+		if err != nil {
+			return err
+		}
+		config = opaqueConfig.(*configuration)
+	case *configuration:
+		config = opt
+	default:
+		return &ErrInvalidDriverConfig{}
+	}
+
+	if config.EnableIPForwarding {
+		err = setupIPForwarding()
+		if err != nil {
+			return err
+		}
+	}
+
+	if config.EnableIPTables {
+		removeIPChains()
+		natChain, filterChain, isolationChain, err = setupIPChains(config)
+		if err != nil {
+			return err
+		}
+	}
+
+	d.Lock()
+	d.natChain = natChain
+	d.filterChain = filterChain
+	d.isolationChain = isolationChain
+	d.config = config
+	d.Unlock()
+
+	err = d.initStore(option)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -616,4 +705,36 @@ func (d *driver) DeleteNetwork(nid string) error {
 		}
 	}
 	return d.storeDelete(config)
+}
+
+func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
+	return fmt.Errorf("Not implemented")
+}
+
+func (d *driver) DeleteEndpoint(nid, eid string) error {
+	return fmt.Errorf("Not implemented")
+}
+
+func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("Not implemented")
+}
+
+func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+	return fmt.Errorf("Not implemented")
+}
+
+func (d *driver) Leave(nid, eid string) error {
+	return fmt.Errorf("Not implemented")
+}
+
+func (d *driver) Type() string {
+	return networkType
+}
+
+func (d *driver) DiscoverNew(dType driverapi.DiscoveryType, data interface{}) error {
+	return fmt.Errorf("Not implemented")
+}
+
+func (d *driver) DiscoverDelete(dType driverapi.DiscoveryType, data interface{}) error {
+	return fmt.Errorf("Not implemented")
 }

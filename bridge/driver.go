@@ -6,7 +6,6 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/go-plugins-helpers/network"
-	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
@@ -15,20 +14,22 @@ import (
 // Driver is a wrapper around the bridge driver to make it support the
 // network.Driver interface.
 type Driver struct {
-	driver *driver
+	driver     *driver
+	capability driverapi.Capability
 }
 
 // NewDriver creates a new bridge driver.
-func NewDriver() *Driver {
+func NewDriver(d driverapi.Driver, c driverapi.Capability) *Driver {
 	return &Driver{
-		driver: newDriver(),
+		driver:     d.(*driver),
+		capability: c,
 	}
 }
 
 // GetCapabilities implements network.Driver.GetCapabilities().
 func (d *Driver) GetCapabilities() (*network.CapabilitiesResponse, error) {
 	return &network.CapabilitiesResponse{
-		Scope: datastore.LocalScope,
+		Scope: d.capability.DataScope,
 	}, nil
 }
 
