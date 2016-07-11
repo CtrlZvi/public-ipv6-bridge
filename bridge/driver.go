@@ -2,20 +2,27 @@ package bridge
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/go-plugins-helpers/network"
 	"github.com/docker/libnetwork/datastore"
+	"github.com/docker/libnetwork/driverapi"
+	"github.com/docker/libnetwork/netlabel"
+	"github.com/docker/libnetwork/options"
 )
 
 // Driver is a wrapper around the bridge driver to make it support the
 // network.Driver interface.
 type Driver struct {
+	driver *driver
 }
 
 // NewDriver creates a new bridge driver.
 func NewDriver() *Driver {
-	return &Driver{}
+	return &Driver{
+		driver: newDriver(),
+	}
 }
 
 // GetCapabilities implements network.Driver.GetCapabilities().
@@ -27,8 +34,28 @@ func (d *Driver) GetCapabilities() (*network.CapabilitiesResponse, error) {
 
 // CreateNetwork implements network.Driver.CreateNetwork().
 func (d *Driver) CreateNetwork(r *network.CreateNetworkRequest) error {
-	logrus.Warnf("Call to unimplemented CreateNetwork")
-	return fmt.Errorf("Not implemented")
+	ipv4Data, err := convertIPAMData(r.IPv4Data)
+	if err != nil {
+		return err
+	}
+	ipv6Data, err := convertIPAMData(r.IPv6Data)
+	if err != nil {
+		return err
+	}
+	option := options.Generic{
+		netlabel.GenericData: map[string]string{},
+	}
+	for label, opt := range r.Options {
+		switch opt := opt.(type) {
+		case map[string]interface{}:
+			for label, value := range opt {
+				option[netlabel.GenericData].(map[string]string)[label] = value.(string)
+			}
+		default:
+			panic(label)
+		}
+	}
+	return d.driver.CreateNetwork(r.NetworkID, option, ipv4Data, ipv6Data)
 }
 
 // DeleteNetwork implements network.Driver.DeleteNetwork().
@@ -91,4 +118,41 @@ func (d *Driver) ProgramExternalConnectivity(*network.ProgramExternalConnectivit
 func (d *Driver) RevokeExternalConnectivity(*network.RevokeExternalConnectivityRequest) error {
 	logrus.Warnf("Call to unimplemented RevokeExternalConnectivity")
 	return fmt.Errorf("Not implemented")
+}
+
+func convertIPAMData(ipamData []*network.IPAMData) ([]driverapi.IPAMData, error) {
+	res := make([]driverapi.IPAMData, 0, len(ipamData))
+	for _, i := range ipamData {
+		pool, err := parseCIDR(i.Pool)
+		if err != nil {
+			return nil, err
+		}
+		gateway, err := parseCIDR(i.Gateway)
+		if err != nil {
+			return nil, err
+		}
+		auxAddresses := make(map[string]*net.IPNet)
+		for id, addr := range i.AuxAddresses {
+			auxAddresses[id], err = parseCIDR(addr.(string))
+			if err != nil {
+				return nil, err
+			}
+		}
+		res = append(res, driverapi.IPAMData{
+			AddressSpace: i.AddressSpace,
+			Pool:         pool,
+			Gateway:      gateway,
+			AuxAddresses: auxAddresses,
+		})
+	}
+	return res, nil
+}
+
+func parseCIDR(cidr string) (*net.IPNet, error) {
+	ip, subnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, err
+	}
+	subnet.IP = ip
+	return subnet, nil
 }
