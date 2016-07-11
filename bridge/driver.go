@@ -5,6 +5,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/go-plugins-helpers/network"
+	"github.com/docker/libnetwork/datastore"
 )
 
 // Driver is a wrapper around the bridge driver to make it support the
@@ -19,8 +20,9 @@ func NewDriver() *Driver {
 
 // GetCapabilities implements network.Driver.GetCapabilities().
 func (d *Driver) GetCapabilities() (*network.CapabilitiesResponse, error) {
-	logrus.Warnf("Call to unimplemented GetCapabilities")
-	return nil, fmt.Errorf("Not implemented")
+	return &network.CapabilitiesResponse{
+		Scope: datastore.LocalScope,
+	}, nil
 }
 
 // CreateNetwork implements network.Driver.CreateNetwork().
