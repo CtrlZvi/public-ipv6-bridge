@@ -15,6 +15,7 @@ import (
 	"github.com/docker/libnetwork/osl"
 	"github.com/docker/libnetwork/portmapper"
 	"github.com/docker/libnetwork/types"
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -553,4 +554,66 @@ func (d *driver) createNetwork(config *networkConfiguration) error {
 	}
 
 	return nil
+}
+
+func (d *driver) DeleteNetwork(nid string) error {
+	var err error
+
+	defer osl.InitOSContext()()
+
+	// Get network handler and remove it from driver
+	d.Lock()
+	n, ok := d.networks[nid]
+	d.Unlock()
+
+	if !ok {
+		return types.InternalMaskableErrorf("network %s does not exist", nid)
+	}
+
+	n.Lock()
+	config := n.config
+	n.Unlock()
+
+	d.Lock()
+	delete(d.networks, nid)
+	d.Unlock()
+
+	// On failure set network handler back in driver, but
+	// only if is not already taken over by some other thread
+	defer func() {
+		if err != nil {
+			d.Lock()
+			if _, ok := d.networks[nid]; !ok {
+				d.networks[nid] = n
+			}
+			d.Unlock()
+		}
+	}()
+
+	// Sanity check
+	if n == nil {
+		err = driverapi.ErrNoNetwork(nid)
+		return err
+	}
+
+	// Cannot remove network if endpoints are still present
+	if len(n.endpoints) != 0 {
+		err = ActiveEndpointsError(n.id)
+		return err
+	}
+
+	// We only delete the bridge when it's not the default bridge. This is keep the backward compatible behavior.
+	if !config.DefaultBridge {
+		if err := netlink.LinkDel(n.bridge.Link); err != nil {
+			logrus.Warnf("Failed to remove bridge interface %s on network %s delete: %v", config.BridgeName, nid, err)
+		}
+	}
+
+	// clean all relevant iptables rules
+	for _, cleanFunc := range n.iptCleanFuncs {
+		if errClean := cleanFunc(); errClean != nil {
+			logrus.Warnf("Failed to clean iptables rules for bridge network: %v", errClean)
+		}
+	}
+	return d.storeDelete(config)
 }

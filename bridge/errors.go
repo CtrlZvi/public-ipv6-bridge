@@ -33,6 +33,14 @@ func (eim ErrInvalidMtu) Error() string {
 	return fmt.Sprintf("invalid MTU number: %d", int(eim))
 }
 
+// ActiveEndpointsError is returned when there are
+// still active endpoints in the network being deleted.
+type ActiveEndpointsError string
+
+func (aee ActiveEndpointsError) Error() string {
+	return fmt.Sprintf("network %s has active endpoint", string(aee))
+}
+
 // NonDefaultBridgeExistError is returned when a non-default
 // bridge config is passed but it does not already exist.
 type NonDefaultBridgeExistError string

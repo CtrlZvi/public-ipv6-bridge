@@ -16,10 +16,12 @@ var (
 )
 
 func main() {
+	kingpin.Parse()
 	if *debug {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 	d := bridge.NewDriver()
+	logrus.Debugf("Starting public IPv6 bridge Docker network plugin")
 	h := network.NewHandler(d)
 	h.ServeUnix("", pluginName)
 }

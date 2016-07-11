@@ -23,6 +23,26 @@ func (d *driver) storeUpdate(kvObject datastore.KVObject) error {
 	return nil
 }
 
+func (d *driver) storeDelete(kvObject datastore.KVObject) error {
+	if d.store == nil {
+		logrus.Debugf("bridge store not initialized. kv object %s is not deleted from store", datastore.Key(kvObject.Key()...))
+		return nil
+	}
+
+retry:
+	if err := d.store.DeleteObjectAtomic(kvObject); err != nil {
+		if err == datastore.ErrKeyModified {
+			if err := d.store.GetObject(datastore.Key(kvObject.Key()...), kvObject); err != nil {
+				return fmt.Errorf("could not update the kvobject to latest when trying to delete: %v", err)
+			}
+			goto retry
+		}
+		return err
+	}
+
+	return nil
+}
+
 func (ncfg *networkConfiguration) Key() []string {
 	return []string{bridgePrefix, ncfg.ID}
 }

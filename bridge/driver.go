@@ -60,8 +60,7 @@ func (d *Driver) CreateNetwork(r *network.CreateNetworkRequest) error {
 
 // DeleteNetwork implements network.Driver.DeleteNetwork().
 func (d *Driver) DeleteNetwork(r *network.DeleteNetworkRequest) error {
-	logrus.Warnf("Call to unimplemented DeleteNetwork")
-	return fmt.Errorf("Not implemented")
+	return d.driver.DeleteNetwork(r.NetworkID)
 }
 
 // CreateEndpoint implements network.Driver.CreateEndpoint().
