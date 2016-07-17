@@ -30,6 +30,7 @@ const (
 	networkType             = "public-ipv6-bridge"
 	vethPrefix              = "veth"
 	vethLen                 = 7
+	containerVethPrefix     = "eth"
 	maxAllocatePortAttempts = 10
 )
 
@@ -397,6 +398,21 @@ func (d *driver) configure(option map[string]interface{}) error {
 	}
 
 	return nil
+}
+
+func (d *driver) getNetwork(id string) (*bridgeNetwork, error) {
+	d.Lock()
+	defer d.Unlock()
+
+	if id == "" {
+		return nil, types.BadRequestErrorf("invalid network id: %s", id)
+	}
+
+	if nw, ok := d.networks[id]; ok {
+		return nw, nil
+	}
+
+	return nil, types.NotFoundErrorf("network not found: %s", id)
 }
 
 func parseNetworkGenericOptions(data interface{}) (*networkConfiguration, error) {
@@ -984,12 +1000,138 @@ func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, erro
 	return nil, fmt.Errorf("Not implemented")
 }
 
+// Join method is invoked when a Sandbox is attached to an endpoint.
 func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
-	return fmt.Errorf("Not implemented")
+	defer osl.InitOSContext()()
+
+	network, err := d.getNetwork(nid)
+	if err != nil {
+		return err
+	}
+
+	endpoint, err := network.getEndpoint(eid)
+	if err != nil {
+		return err
+	}
+
+	if endpoint == nil {
+		return EndpointNotFoundError(eid)
+	}
+
+	iNames := jinfo.InterfaceName()
+	err = iNames.SetNames(endpoint.srcName, containerVethPrefix)
+	if err != nil {
+		return err
+	}
+
+	err = jinfo.SetGateway(network.bridge.gatewayIPv4)
+	if err != nil {
+		return err
+	}
+
+	err = jinfo.SetGatewayIPv6(network.bridge.gatewayIPv6)
+	if err != nil {
+		return err
+	}
+
+	if !network.config.EnableICC {
+		return d.link(network, endpoint, options, true)
+	}
+
+	return nil
 }
 
 func (d *driver) Leave(nid, eid string) error {
 	return fmt.Errorf("Not implemented")
+}
+
+func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, options map[string]interface{}, enable bool) error {
+	var (
+		cc  *containerConfiguration
+		err error
+	)
+
+	if enable {
+		cc, err = parseContainerOptions(options)
+		if err != nil {
+			return err
+		}
+	} else {
+		cc = endpoint.containerConfig
+	}
+
+	if cc == nil {
+		return nil
+	}
+
+	if endpoint.config != nil && endpoint.config.ExposedPorts != nil {
+		for _, p := range cc.ParentEndpoints {
+			var parentEndpoint *bridgeEndpoint
+			parentEndpoint, err = network.getEndpoint(p)
+			if err != nil {
+				return err
+			}
+			if parentEndpoint == nil {
+				err = InvalidEndpointIDError(p)
+				return err
+			}
+
+			l := newLink(parentEndpoint.addr.IP.String(),
+				endpoint.addr.IP.String(),
+				endpoint.config.ExposedPorts, network.config.BridgeName)
+			if enable {
+				err = l.Enable()
+				if err != nil {
+					return err
+				}
+				defer func() {
+					if err != nil {
+						l.Disable()
+					}
+				}()
+			} else {
+				l.Disable()
+			}
+		}
+	}
+
+	for _, c := range cc.ChildEndpoints {
+		var childEndpoint *bridgeEndpoint
+		childEndpoint, err = network.getEndpoint(c)
+		if err != nil {
+			return err
+		}
+		if childEndpoint == nil {
+			err = InvalidEndpointIDError(c)
+			return err
+		}
+		if childEndpoint.config == nil || childEndpoint.config.ExposedPorts == nil {
+			continue
+		}
+
+		l := newLink(endpoint.addr.IP.String(),
+			childEndpoint.addr.IP.String(),
+			childEndpoint.config.ExposedPorts, network.config.BridgeName)
+		if enable {
+			err = l.Enable()
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if err != nil {
+					l.Disable()
+				}
+			}()
+		} else {
+			l.Disable()
+		}
+	}
+
+	if enable {
+		endpoint.containerConfig = cc
+	}
+
+	return nil
 }
 
 func (d *driver) Type() string {
@@ -1036,6 +1178,28 @@ func parseEndpointOptions(epOptions map[string]interface{}) (*endpointConfigurat
 	}
 
 	return ec, nil
+}
+
+func parseContainerOptions(cOptions map[string]interface{}) (*containerConfiguration, error) {
+	if cOptions == nil {
+		return nil, nil
+	}
+	genericData := cOptions[netlabel.GenericData]
+	if genericData == nil {
+		return nil, nil
+	}
+	switch opt := genericData.(type) {
+	case options.Generic:
+		opaqueConfig, err := options.GenerateFromModel(opt, &containerConfiguration{})
+		if err != nil {
+			return nil, err
+		}
+		return opaqueConfig.(*containerConfiguration), nil
+	case *containerConfiguration:
+		return opt, nil
+	default:
+		return nil, nil
+	}
 }
 
 func electMacAddress(epConfig *endpointConfiguration, ip net.IP) net.HardwareAddr {

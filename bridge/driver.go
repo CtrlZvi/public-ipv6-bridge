@@ -167,8 +167,37 @@ func (d *Driver) EndpointInfo(r *network.InfoRequest) (*network.InfoResponse, er
 
 // Join implements network.Driver.Join().
 func (d *Driver) Join(r *network.JoinRequest) (*network.JoinResponse, error) {
-	logrus.Warnf("Call to unimplemented Join")
-	return nil, fmt.Errorf("Not implemented")
+	ep := &endpoint{
+		joinInfo: &endpointJoinInfo{},
+		iface:    &endpointInterface{},
+	}
+	err := d.driver.Join(
+		r.NetworkID,
+		r.EndpointID,
+		r.SandboxKey,
+		ep,
+		r.Options,
+	)
+
+	staticRoutes := make([]*network.StaticRoute, 0, len(ep.joinInfo.StaticRoutes))
+	for _, sr := range ep.joinInfo.StaticRoutes {
+		staticRoutes = append(staticRoutes, &network.StaticRoute{
+			Destination: sr.Destination.String(),
+			RouteType:   sr.RouteType,
+			NextHop:     sr.NextHop.String(),
+		})
+	}
+
+	return &network.JoinResponse{
+		InterfaceName: network.InterfaceName{
+			SrcName:   ep.iface.srcName,
+			DstPrefix: ep.iface.dstPrefix,
+		},
+		Gateway:               ep.joinInfo.gw.String(),
+		GatewayIPv6:           ep.joinInfo.gw6.String(),
+		StaticRoutes:          staticRoutes,
+		DisableGatewayService: ep.joinInfo.disableGatewayService,
+	}, err
 }
 
 // Leave implements network.Driver.Leave().

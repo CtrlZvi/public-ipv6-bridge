@@ -78,6 +78,14 @@ func (ieie InvalidEndpointIDError) Error() string {
 	return fmt.Sprintf("invalid endpoint id: %s", string(ieie))
 }
 
+// EndpointNotFoundError is returned when the no endpoint
+// with the passed endpoint id is found.
+type EndpointNotFoundError string
+
+func (enfe EndpointNotFoundError) Error() string {
+	return fmt.Sprintf("endpoint not found: %s", string(enfe))
+}
+
 // NonDefaultBridgeExistError is returned when a non-default
 // bridge config is passed but it does not already exist.
 type NonDefaultBridgeExistError string
@@ -91,6 +99,13 @@ type IPTableCfgError string
 
 func (name IPTableCfgError) Error() string {
 	return fmt.Sprintf("unexpected request to set IP tables for interface: %s", string(name))
+}
+
+// InvalidIPTablesCfgError is returned when an invalid ip tables configuration is entered
+type InvalidIPTablesCfgError string
+
+func (action InvalidIPTablesCfgError) Error() string {
+	return fmt.Sprintf("Invalid IPTables action '%s'", string(action))
 }
 
 // IPv4AddrAddError is returned when IPv4 address could not be added to the bridge.
@@ -128,4 +143,11 @@ type IPv6AddrNoMatchError net.IPNet
 
 func (ipv6 *IPv6AddrNoMatchError) Error() string {
 	return fmt.Sprintf("bridge IPv6 addresses do not match the expected bridge configuration %s", (*net.IPNet)(ipv6).String())
+}
+
+// InvalidLinkIPAddrError is returned when a link is configured to a container with an invalid ip address
+type InvalidLinkIPAddrError string
+
+func (address InvalidLinkIPAddrError) Error() string {
+	return fmt.Sprintf("Cannot link to a container with Invalid IP Address '%s'", string(address))
 }
