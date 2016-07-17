@@ -993,7 +993,66 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 }
 
 func (d *driver) DeleteEndpoint(nid, eid string) error {
-	return fmt.Errorf("Not implemented")
+	var err error
+
+	defer osl.InitOSContext()()
+
+	// Get the network handler and make sure it exists
+	d.Lock()
+	n, ok := d.networks[nid]
+	d.Unlock()
+
+	if !ok {
+		return types.InternalMaskableErrorf("network %s does not exist", nid)
+	}
+	if n == nil {
+		return driverapi.ErrNoNetwork(nid)
+	}
+
+	// Sanity Check
+	n.Lock()
+	if n.id != nid {
+		n.Unlock()
+		return InvalidNetworkIDError(nid)
+	}
+	n.Unlock()
+
+	// Check endpoint id and if an endpoint is actually there
+	ep, err := n.getEndpoint(eid)
+	if err != nil {
+		return err
+	}
+	if ep == nil {
+		return EndpointNotFoundError(eid)
+	}
+
+	// Remove it
+	n.Lock()
+	delete(n.endpoints, eid)
+	n.Unlock()
+
+	// On failure make sure to set back ep in n.endpoints, but only
+	// if it hasn't been taken over already by some other thread.
+	defer func() {
+		if err != nil {
+			n.Lock()
+			if _, ok := n.endpoints[eid]; !ok {
+				n.endpoints[eid] = ep
+			}
+			n.Unlock()
+		}
+	}()
+
+	// Remove port mappings. Do not stop endpoint delete on unmap failure
+	n.releasePorts(ep)
+
+	// Try removal of link. Discard error: it is a best effort.
+	// Also make sure defer does not see this error either.
+	if link, err := netlink.LinkByName(ep.srcName); err == nil {
+		netlink.LinkDel(link)
+	}
+
+	return nil
 }
 
 func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, error) {
@@ -1093,8 +1152,29 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 	return nil
 }
 
+// Leave method is invoked when a Sandbox detaches from an endpoint.
 func (d *driver) Leave(nid, eid string) error {
-	return fmt.Errorf("Not implemented")
+	defer osl.InitOSContext()()
+
+	network, err := d.getNetwork(nid)
+	if err != nil {
+		return types.InternalMaskableErrorf("%s", err)
+	}
+
+	endpoint, err := network.getEndpoint(eid)
+	if err != nil {
+		return err
+	}
+
+	if endpoint == nil {
+		return EndpointNotFoundError(eid)
+	}
+
+	if !network.config.EnableICC {
+		return d.link(network, endpoint, nil, false)
+	}
+
+	return nil
 }
 
 func (d *driver) link(network *bridgeNetwork, endpoint *bridgeEndpoint, options map[string]interface{}, enable bool) error {

@@ -98,6 +98,10 @@ func (n *bridgeNetwork) allocatePort(bnd *types.PortBinding, containerIP, defHos
 	}
 }
 
+func (n *bridgeNetwork) releasePorts(ep *bridgeEndpoint) error {
+	return n.releasePortsInternal(ep.portMapping)
+}
+
 func (n *bridgeNetwork) releasePortsInternal(bindings []types.PortBinding) error {
 	var errorBuf bytes.Buffer
 

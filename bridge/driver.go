@@ -155,8 +155,7 @@ func (d *Driver) CreateEndpoint(r *network.CreateEndpointRequest) (*network.Crea
 
 // DeleteEndpoint implements network.Driver.DeleteEndpoint().
 func (d *Driver) DeleteEndpoint(r *network.DeleteEndpointRequest) error {
-	logrus.Warnf("Call to unimplemented DeleteEndpoint")
-	return fmt.Errorf("Not implemented")
+	return d.driver.DeleteEndpoint(r.NetworkID, r.EndpointID)
 }
 
 // EndpointInfo implements network.Driver.EndpointInfo().
@@ -220,8 +219,7 @@ func (d *Driver) Join(r *network.JoinRequest) (*network.JoinResponse, error) {
 
 // Leave implements network.Driver.Leave().
 func (d *Driver) Leave(r *network.LeaveRequest) error {
-	logrus.Warnf("Call to unimplemented Leave")
-	return fmt.Errorf("Not implemented")
+	return d.driver.Leave(r.NetworkID, r.EndpointID)
 }
 
 // DiscoverNew implements network.Driver.DiscoverNew().
