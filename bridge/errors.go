@@ -12,6 +12,13 @@ func (eidc *ErrInvalidDriverConfig) Error() string {
 	return "Invalid configuration passed to Bridge Driver"
 }
 
+// ErrInvalidEndpointConfig error is returned when a endpoint create is attempted with an invalid endpoint configuration.
+type ErrInvalidEndpointConfig struct{}
+
+func (eiec *ErrInvalidEndpointConfig) Error() string {
+	return "trying to create an endpoint with an invalid endpoint configuration"
+}
+
 // ErrNoIPAddr error is returned when bridge has no IPv4 address configured.
 type ErrNoIPAddr struct{}
 
@@ -40,12 +47,35 @@ func (eim ErrInvalidMtu) Error() string {
 	return fmt.Sprintf("invalid MTU number: %d", int(eim))
 }
 
+// ErrUnsupportedAddressType is returned when the specified address type is not supported.
+type ErrUnsupportedAddressType string
+
+func (uat ErrUnsupportedAddressType) Error() string {
+	return fmt.Sprintf("unsupported address type: %s", string(uat))
+}
+
 // ActiveEndpointsError is returned when there are
 // still active endpoints in the network being deleted.
 type ActiveEndpointsError string
 
 func (aee ActiveEndpointsError) Error() string {
 	return fmt.Sprintf("network %s has active endpoint", string(aee))
+}
+
+// InvalidNetworkIDError is returned when the passed
+// network id for an existing network is not a known id.
+type InvalidNetworkIDError string
+
+func (inie InvalidNetworkIDError) Error() string {
+	return fmt.Sprintf("invalid network id %s", string(inie))
+}
+
+// InvalidEndpointIDError is returned when the passed
+// endpoint id is not valid.
+type InvalidEndpointIDError string
+
+func (ieie InvalidEndpointIDError) Error() string {
+	return fmt.Sprintf("invalid endpoint id: %s", string(ieie))
 }
 
 // NonDefaultBridgeExistError is returned when a non-default

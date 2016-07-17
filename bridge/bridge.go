@@ -1,19 +1,24 @@
 package bridge
 
 import (
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netlabel"
+	"github.com/docker/libnetwork/netutils"
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/osl"
 	"github.com/docker/libnetwork/portmapper"
@@ -22,7 +27,10 @@ import (
 )
 
 const (
-	networkType = "public-ipv6-bridge"
+	networkType             = "public-ipv6-bridge"
+	vethPrefix              = "veth"
+	vethLen                 = 7
+	maxAllocatePortAttempts = 10
 )
 
 const (
@@ -251,6 +259,21 @@ func (n *bridgeNetwork) getNetworkBridgeName() string {
 	n.Unlock()
 
 	return config.BridgeName
+}
+
+func (n *bridgeNetwork) getEndpoint(eid string) (*bridgeEndpoint, error) {
+	n.Lock()
+	defer n.Unlock()
+
+	if eid == "" {
+		return nil, InvalidEndpointIDError(eid)
+	}
+
+	if ep, ok := n.endpoints[eid]; ok {
+		return ep, nil
+	}
+
+	return nil, nil
 }
 
 // Install/Removes the iptables rules needed to isolate this network
@@ -707,8 +730,250 @@ func (d *driver) DeleteNetwork(nid string) error {
 	return d.storeDelete(config)
 }
 
+func addToBridge(ifaceName, bridgeName string) error {
+	link, err := netlink.LinkByName(ifaceName)
+	if err != nil {
+		return fmt.Errorf("could not find interface %s: %v", ifaceName, err)
+	}
+	if err = netlink.LinkSetMaster(link,
+		&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridgeName}}); err != nil {
+		logrus.Debugf("Failed to add %s to bridge via netlink.Trying ioctl: %v", ifaceName, err)
+		iface, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			return fmt.Errorf("could not find network interface %s: %v", ifaceName, err)
+		}
+
+		master, err := net.InterfaceByName(bridgeName)
+		if err != nil {
+			return fmt.Errorf("could not find bridge %s: %v", bridgeName, err)
+		}
+
+		return ioctlAddToBridge(iface, master)
+	}
+	return nil
+}
+
+func setHairpinMode(link netlink.Link, enable bool) error {
+	err := netlink.LinkSetHairpin(link, enable)
+	if err != nil && err != syscall.EINVAL {
+		// If error is not EINVAL something else went wrong, bail out right away
+		return fmt.Errorf("unable to set hairpin mode on %s via netlink: %v",
+			link.Attrs().Name, err)
+	}
+
+	// Hairpin mode successfully set up
+	if err == nil {
+		return nil
+	}
+
+	// The netlink method failed with EINVAL which is probably because of an older
+	// kernel. Try one more time via the sysfs method.
+	path := filepath.Join("/sys/class/net", link.Attrs().Name, "brport/hairpin_mode")
+
+	var val []byte
+	if enable {
+		val = []byte{'1', '\n'}
+	} else {
+		val = []byte{'0', '\n'}
+	}
+
+	if err := ioutil.WriteFile(path, val, 0644); err != nil {
+		return fmt.Errorf("unable to set hairpin mode on %s via sysfs: %v", link.Attrs().Name, err)
+	}
+
+	return nil
+}
+
 func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
-	return fmt.Errorf("Not implemented")
+	defer osl.InitOSContext()()
+
+	if ifInfo == nil {
+		return errors.New("invalid interface info passed")
+	}
+
+	// Get the network handler and make sure it exists
+	d.Lock()
+	n, ok := d.networks[nid]
+	dconfig := d.config
+	d.Unlock()
+
+	if !ok {
+		return types.NotFoundErrorf("network %s does not exist", nid)
+	}
+	if n == nil {
+		return driverapi.ErrNoNetwork(nid)
+	}
+
+	// Sanity check
+	n.Lock()
+	if n.id != nid {
+		n.Unlock()
+		return InvalidNetworkIDError(nid)
+	}
+	n.Unlock()
+
+	// Check if endpoint id is good and retrieve correspondent endpoint
+	ep, err := n.getEndpoint(eid)
+	if err != nil {
+		return err
+	}
+
+	// Endpoint with that id exists either on desired or other sandbox
+	if ep != nil {
+		return driverapi.ErrEndpointExists(eid)
+	}
+
+	// Try to convert the options to endpoint configuration
+	epConfig, err := parseEndpointOptions(epOptions)
+	if err != nil {
+		return err
+	}
+
+	// Create and add the endpoint
+	n.Lock()
+	endpoint := &bridgeEndpoint{id: eid, config: epConfig}
+	n.endpoints[eid] = endpoint
+	n.Unlock()
+
+	// On failure make sure to remove the endpoint
+	defer func() {
+		if err != nil {
+			n.Lock()
+			delete(n.endpoints, eid)
+			n.Unlock()
+		}
+	}()
+
+	// Generate a name for what will be the host side pipe interface
+	hostIfName, err := netutils.GenerateIfaceName(vethPrefix, vethLen)
+	if err != nil {
+		return err
+	}
+
+	// Generate a name for what will be the sandbox side pipe interface
+	containerIfName, err := netutils.GenerateIfaceName(vethPrefix, vethLen)
+	if err != nil {
+		return err
+	}
+
+	// Generate and add the interface pipe host <-> sandbox
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{Name: hostIfName, TxQLen: 0},
+		PeerName:  containerIfName}
+	if err = netlink.LinkAdd(veth); err != nil {
+		return types.InternalErrorf("failed to add the host (%s) <=> sandbox (%s) pair interfaces: %v", hostIfName, containerIfName, err)
+	}
+
+	// Get the host side pipe interface handler
+	host, err := netlink.LinkByName(hostIfName)
+	if err != nil {
+		return types.InternalErrorf("failed to find host side interface %s: %v", hostIfName, err)
+	}
+	defer func() {
+		if err != nil {
+			netlink.LinkDel(host)
+		}
+	}()
+
+	// Get the sandbox side pipe interface handler
+	sbox, err := netlink.LinkByName(containerIfName)
+	if err != nil {
+		return types.InternalErrorf("failed to find sandbox side interface %s: %v", containerIfName, err)
+	}
+	defer func() {
+		if err != nil {
+			netlink.LinkDel(sbox)
+		}
+	}()
+
+	n.Lock()
+	config := n.config
+	n.Unlock()
+
+	// Add bridge inherited attributes to pipe interfaces
+	if config.Mtu != 0 {
+		err = netlink.LinkSetMTU(host, config.Mtu)
+		if err != nil {
+			return types.InternalErrorf("failed to set MTU on host interface %s: %v", hostIfName, err)
+		}
+		err = netlink.LinkSetMTU(sbox, config.Mtu)
+		if err != nil {
+			return types.InternalErrorf("failed to set MTU on sandbox interface %s: %v", containerIfName, err)
+		}
+	}
+
+	// Attach host side pipe interface into the bridge
+	if err = addToBridge(hostIfName, config.BridgeName); err != nil {
+		return fmt.Errorf("adding interface %s to bridge %s failed: %v", hostIfName, config.BridgeName, err)
+	}
+
+	if !dconfig.EnableUserlandProxy {
+		err = setHairpinMode(host, true)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Create the sandbox side pipe interface
+	endpoint.srcName = containerIfName
+	endpoint.macAddress = ifInfo.MacAddress()
+	endpoint.addr = ifInfo.Address()
+	endpoint.addrv6 = ifInfo.AddressIPv6()
+
+	// Down the interface before configuring mac address.
+	if err = netlink.LinkSetDown(sbox); err != nil {
+		return fmt.Errorf("could not set link down for container interface %s: %v", containerIfName, err)
+	}
+
+	// Set the sbox's MAC. If specified, use the one configured by user, otherwise generate one based on IP.
+	if endpoint.macAddress == nil {
+		endpoint.macAddress = electMacAddress(epConfig, endpoint.addr.IP)
+		if err := ifInfo.SetMacAddress(endpoint.macAddress); err != nil {
+			return err
+		}
+	}
+	err = netlink.LinkSetHardwareAddr(sbox, endpoint.macAddress)
+	if err != nil {
+		return fmt.Errorf("could not set mac address for container interface %s: %v", containerIfName, err)
+	}
+
+	// Up the host interface after finishing all netlink configuration
+	if err = netlink.LinkSetUp(host); err != nil {
+		return fmt.Errorf("could not set link up for host interface %s: %v", hostIfName, err)
+	}
+
+	if endpoint.addrv6 == nil && config.EnableIPv6 {
+		var ip6 net.IP
+		network := n.bridge.bridgeIPv6
+		if config.AddressIPv6 != nil {
+			network = config.AddressIPv6
+		}
+
+		ones, _ := network.Mask.Size()
+		if ones > 80 {
+			err = types.ForbiddenErrorf("Cannot self generate an IPv6 address on network %v: At least 48 host bits are needed.", network)
+			return err
+		}
+
+		ip6 = make(net.IP, len(network.IP))
+		copy(ip6, network.IP)
+		for i, h := range endpoint.macAddress {
+			ip6[i+10] = h
+		}
+
+		endpoint.addrv6 = &net.IPNet{IP: ip6, Mask: network.Mask}
+		if err := ifInfo.SetIPAddress(endpoint.addrv6); err != nil {
+			return err
+		}
+	}
+
+	// Program any required port mapping and store them in the endpoint
+	endpoint.portMapping, err = n.allocatePorts(epConfig, endpoint, config.DefaultBindingIP, d.config.EnableUserlandProxy)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (d *driver) DeleteEndpoint(nid, eid string) error {
@@ -737,4 +1002,45 @@ func (d *driver) DiscoverNew(dType driverapi.DiscoveryType, data interface{}) er
 
 func (d *driver) DiscoverDelete(dType driverapi.DiscoveryType, data interface{}) error {
 	return fmt.Errorf("Not implemented")
+}
+
+func parseEndpointOptions(epOptions map[string]interface{}) (*endpointConfiguration, error) {
+	if epOptions == nil {
+		return nil, nil
+	}
+
+	ec := &endpointConfiguration{}
+
+	if opt, ok := epOptions[netlabel.MacAddress]; ok {
+		if mac, ok := opt.(net.HardwareAddr); ok {
+			ec.MacAddress = mac
+		} else {
+			return nil, &ErrInvalidEndpointConfig{}
+		}
+	}
+
+	if opt, ok := epOptions[netlabel.PortMap]; ok {
+		if bs, ok := opt.([]types.PortBinding); ok {
+			ec.PortBindings = bs
+		} else {
+			return nil, &ErrInvalidEndpointConfig{}
+		}
+	}
+
+	if opt, ok := epOptions[netlabel.ExposedPorts]; ok {
+		if ports, ok := opt.([]types.TransportPort); ok {
+			ec.ExposedPorts = ports
+		} else {
+			return nil, &ErrInvalidEndpointConfig{}
+		}
+	}
+
+	return ec, nil
+}
+
+func electMacAddress(epConfig *endpointConfiguration, ip net.IP) net.HardwareAddr {
+	if epConfig != nil && epConfig.MacAddress != nil {
+		return epConfig.MacAddress
+	}
+	return netutils.GenerateMACFromIP(ip)
 }

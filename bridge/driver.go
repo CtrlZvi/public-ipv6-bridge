@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
+	"github.com/docker/libnetwork/types"
 )
 
 // Driver is a wrapper around the bridge driver to make it support the
@@ -66,8 +68,89 @@ func (d *Driver) DeleteNetwork(r *network.DeleteNetworkRequest) error {
 
 // CreateEndpoint implements network.Driver.CreateEndpoint().
 func (d *Driver) CreateEndpoint(r *network.CreateEndpointRequest) (*network.CreateEndpointResponse, error) {
-	logrus.Warnf("Call to unimplemented CreateEndpoint")
-	return nil, fmt.Errorf("Not implemented")
+	ifProvided := r.Interface.Address != "" ||
+		r.Interface.AddressIPv6 != "" ||
+		r.Interface.MacAddress != ""
+
+	var err error
+	epi := &endpointInterface{}
+	if r.Interface.Address != "" {
+		epi.addr, err = parseCIDR(r.Interface.Address)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if r.Interface.AddressIPv6 != "" {
+		epi.addrv6, err = parseCIDR(r.Interface.AddressIPv6)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if r.Interface.MacAddress != "" {
+		epi.mac, err = net.ParseMAC(r.Interface.MacAddress)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if opt, ok := r.Options[netlabel.PortMap]; ok {
+		pblist := []types.PortBinding{}
+
+		for i := 0; i < len(opt.([]interface{})); i++ {
+			pb := types.PortBinding{}
+			tmp := opt.([]interface{})[i].(map[string]interface{})
+
+			bytes, err := json.Marshal(tmp)
+			if err != nil {
+				logrus.Errorf("Couldn't remarshal the port binding")
+				return nil, err
+			}
+			err = json.Unmarshal(bytes, &pb)
+			if err != nil {
+				logrus.Errorf("Couldn't unmarshal the port binding")
+				return nil, err
+			}
+			pblist = append(pblist, pb)
+		}
+		r.Options[netlabel.PortMap] = pblist
+	}
+
+	if opt, ok := r.Options[netlabel.ExposedPorts]; ok {
+		tplist := []types.TransportPort{}
+
+		for i := 0; i < len(opt.([]interface{})); i++ {
+			tp := types.TransportPort{}
+			tmp := opt.([]interface{})[i].(map[string]interface{})
+
+			bytes, err := json.Marshal(tmp)
+			if err != nil {
+				logrus.Errorf("Couldn't remarshal the exposed port")
+				break
+			}
+			err = json.Unmarshal(bytes, &tp)
+			if err != nil {
+				logrus.Errorf("Couldn't unmarshal the exposed port")
+				break
+			}
+			tplist = append(tplist, tp)
+		}
+		r.Options[netlabel.ExposedPorts] = tplist
+	}
+
+	err = d.driver.CreateEndpoint(r.NetworkID, r.EndpointID, epi, r.Options)
+	if ifProvided {
+		return &network.CreateEndpointResponse{
+			Interface: nil,
+		}, err
+	}
+
+	return &network.CreateEndpointResponse{
+		Interface: &network.EndpointInterface{
+			Address:     epi.Address().String(),
+			AddressIPv6: epi.AddressIPv6().String(),
+			MacAddress:  epi.MacAddress().String(),
+		},
+	}, err
 }
 
 // DeleteEndpoint implements network.Driver.DeleteEndpoint().
