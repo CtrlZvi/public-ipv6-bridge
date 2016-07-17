@@ -997,7 +997,59 @@ func (d *driver) DeleteEndpoint(nid, eid string) error {
 }
 
 func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("Not implemented")
+	// Get the network handler and make sure it exists
+	d.Lock()
+	n, ok := d.networks[nid]
+	d.Unlock()
+	if !ok {
+		return nil, types.NotFoundErrorf("network %s does not exist", nid)
+	}
+	if n == nil {
+		return nil, driverapi.ErrNoNetwork(nid)
+	}
+
+	// Sanity check
+	n.Lock()
+	if n.id != nid {
+		n.Unlock()
+		return nil, InvalidNetworkIDError(nid)
+	}
+	n.Unlock()
+
+	// Check if endpoint id is good and retrieve correspondent endpoint
+	ep, err := n.getEndpoint(eid)
+	if err != nil {
+		return nil, err
+	}
+	if ep == nil {
+		return nil, driverapi.ErrNoEndpoint(eid)
+	}
+
+	m := make(map[string]interface{})
+
+	if ep.config.ExposedPorts != nil {
+		// Return a copy of the config data
+		epc := make([]types.TransportPort, 0, len(ep.config.ExposedPorts))
+		for _, tp := range ep.config.ExposedPorts {
+			epc = append(epc, tp.GetCopy())
+		}
+		m[netlabel.ExposedPorts] = epc
+	}
+
+	if ep.portMapping != nil {
+		// Return a copy of the operational data
+		pmc := make([]types.PortBinding, 0, len(ep.portMapping))
+		for _, pm := range ep.portMapping {
+			pmc = append(pmc, pm.GetCopy())
+		}
+		m[netlabel.PortMap] = pmc
+	}
+
+	if len(ep.macAddress) != 0 {
+		m[netlabel.MacAddress] = ep.macAddress
+	}
+
+	return m, nil
 }
 
 // Join method is invoked when a Sandbox is attached to an endpoint.

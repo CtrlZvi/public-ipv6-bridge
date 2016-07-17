@@ -161,8 +161,26 @@ func (d *Driver) DeleteEndpoint(r *network.DeleteEndpointRequest) error {
 
 // EndpointInfo implements network.Driver.EndpointInfo().
 func (d *Driver) EndpointInfo(r *network.InfoRequest) (*network.InfoResponse, error) {
-	logrus.Warnf("Call to unimplemented EndpointInfo")
-	return nil, fmt.Errorf("Not implemented")
+	info, err := d.driver.EndpointOperInfo(r.NetworkID, r.EndpointID)
+	values := map[string]string{}
+	for k, v := range info {
+		switch k {
+		case netlabel.MacAddress:
+			values[k] = v.(net.HardwareAddr).String()
+		case netlabel.ExposedPorts, netlabel.PortMap:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, err
+			}
+			values[k] = string(b)
+		default:
+			return nil, fmt.Errorf("Unsupported endpoint info: %s", k)
+		}
+	}
+
+	return &network.InfoResponse{
+		Value: values,
+	}, err
 }
 
 // Join implements network.Driver.Join().
