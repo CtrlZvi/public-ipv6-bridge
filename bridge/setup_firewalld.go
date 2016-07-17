@@ -1,6 +1,6 @@
 package bridge
 
-import "github.com/docker/libnetwork/iptables"
+import "github.com/CtrlZvi/public-ipv6-bridge/iptables"
 
 func (n *bridgeNetwork) setupFirewalld(config *networkConfiguration, i *bridgeInterface) error {
 	d := n.driver

@@ -13,15 +13,15 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/CtrlZvi/public-ipv6-bridge/iptables"
+	"github.com/CtrlZvi/public-ipv6-bridge/portmapper"
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
-	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/netutils"
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/osl"
-	"github.com/docker/libnetwork/portmapper"
 	"github.com/docker/libnetwork/types"
 	"github.com/vishvananda/netlink"
 )

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/CtrlZvi/public-ipv6-bridge/iptables"
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netutils"
 )
 
