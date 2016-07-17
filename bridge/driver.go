@@ -224,14 +224,18 @@ func (d *Driver) Leave(r *network.LeaveRequest) error {
 
 // DiscoverNew implements network.Driver.DiscoverNew().
 func (d *Driver) DiscoverNew(n *network.DiscoveryNotification) error {
-	logrus.Warnf("Call to unimplemented DiscoverNew")
-	return fmt.Errorf("Not implemented")
+	return d.driver.DiscoverNew(
+		driverapi.DiscoveryType(n.DiscoveryType),
+		n.DiscoveryData,
+	)
 }
 
 // DiscoverDelete implements network.Driver.DiscoverDelete().
 func (d *Driver) DiscoverDelete(n *network.DiscoveryNotification) error {
-	logrus.Warnf("Call to unimplemented DiscoverDelete")
-	return fmt.Errorf("Not implemented")
+	return d.driver.DiscoverDelete(
+		driverapi.DiscoveryType(n.DiscoveryType),
+		n.DiscoveryData,
+	)
 }
 
 // ProgramExternalConnectivity implements

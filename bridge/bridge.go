@@ -1270,12 +1270,14 @@ func (d *driver) Type() string {
 	return networkType
 }
 
+// DiscoverNew is a notification for a new discovery event, such as a new node joining a cluster
 func (d *driver) DiscoverNew(dType driverapi.DiscoveryType, data interface{}) error {
-	return fmt.Errorf("Not implemented")
+	return nil
 }
 
+// DiscoverDelete is a notification for a discovery delete event, such as a node leaving a cluster
 func (d *driver) DiscoverDelete(dType driverapi.DiscoveryType, data interface{}) error {
-	return fmt.Errorf("Not implemented")
+	return nil
 }
 
 func parseEndpointOptions(epOptions map[string]interface{}) (*endpointConfiguration, error) {
