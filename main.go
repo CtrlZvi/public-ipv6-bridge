@@ -18,7 +18,9 @@ const (
 )
 
 var (
-	debug = kingpin.Flag("debug", "enable debug logging").Default("false").Bool()
+	debug     = kingpin.Flag("debug", "Enable debug mode").Short('D').Default("false").Bool()
+	iptables  = kingpin.Flag("iptables", "Enable addition of iptables rules").Default("true").Bool()
+	ipForward = kingpin.Flag("ip-forward", "Enable net.ipv4.ip_forward").Default("true").Bool()
 )
 
 type driverCallback struct {
@@ -41,7 +43,10 @@ func main() {
 	}
 
 	dc := &driverCallback{}
-	driverOptions := options.Generic{}
+	driverOptions := options.Generic{
+		"EnableIPTables":     *iptables,
+		"EnableIPForwarding": *ipForward,
+	}
 	genericOption := make(map[string]interface{})
 	genericOption[netlabel.GenericData] = driverOptions
 	for k, v := range datastore.DefaultScopes("") {
