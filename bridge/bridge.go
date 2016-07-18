@@ -1036,6 +1036,20 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 			logrus.Warnf("could not add the neighbor proxy: %v", err)
 			return err
 		}
+
+		if endpoint.config != nil {
+			for _, port := range endpoint.config.ExposedPorts {
+				insert := []string{
+					string(iptables.Insert),
+					DockerChain,
+					"-p", port.Proto.String(),
+					"-d", endpoint.addrv6.String(),
+					"--dport", strconv.Itoa(int(port.Port)),
+					"-j", "ACCEPT",
+				}
+				iptables.Raw(iptables.IP6Tables, insert...)
+			}
+		}
 	}
 
 	// Program any required port mapping and store them in the endpoint
@@ -1100,6 +1114,27 @@ func (d *driver) DeleteEndpoint(nid, eid string) error {
 
 	// Remove port mappings. Do not stop endpoint delete on unmap failure
 	n.releasePorts(ep)
+
+	if ep.config != nil {
+		for _, port := range ep.config.ExposedPorts {
+			rule := []string{
+				"-p", port.Proto.String(),
+				"-d", ep.addrv6.String(),
+				"--dport", strconv.Itoa(int(port.Port)),
+				"-j", "ACCEPT",
+			}
+			if iptables.Exists(iptables.IP6Tables, iptables.Filter, DockerChain, rule...) {
+				delete := append(
+					[]string{
+						string(iptables.Delete),
+						DockerChain,
+					},
+					rule...,
+				)
+				iptables.Raw(iptables.IP6Tables, delete...)
+			}
+		}
+	}
 
 	// Try removal of neighbor proxy. Discard error: it is a best effort.
 	// Also make sure defer does not see this error either.
