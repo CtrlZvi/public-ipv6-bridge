@@ -108,13 +108,15 @@ type bridgeNetwork struct {
 }
 
 type driver struct {
-	config         *configuration
-	network        *bridgeNetwork
-	natChain       *iptables.ChainInfo
-	filterChain    *iptables.ChainInfo
-	isolationChain *iptables.ChainInfo
-	networks       map[string]*bridgeNetwork
-	store          datastore.DataStore
+	config          *configuration
+	network         *bridgeNetwork
+	natChain        *iptables.ChainInfo
+	filterChain     *iptables.ChainInfo
+	isolationChain  *iptables.ChainInfo
+	filter6Chain    *iptables.ChainInfo
+	isolation6Chain *iptables.ChainInfo
+	networks        map[string]*bridgeNetwork
+	store           datastore.DataStore
 	sync.Mutex
 }
 
@@ -257,6 +259,17 @@ func (n *bridgeNetwork) getDriverChains() (*iptables.ChainInfo, *iptables.ChainI
 	return n.driver.natChain, n.driver.filterChain, n.driver.isolationChain, nil
 }
 
+func (n *bridgeNetwork) getDriver6Chains() (*iptables.ChainInfo, *iptables.ChainInfo, error) {
+	n.Lock()
+	defer n.Unlock()
+
+	if n.driver == nil {
+		return nil, nil, types.BadRequestErrorf("no driver found")
+	}
+
+	return n.driver.filter6Chain, n.driver.isolation6Chain, nil
+}
+
 func (n *bridgeNetwork) getNetworkBridgeName() string {
 	n.Lock()
 	config := n.config
@@ -348,11 +361,13 @@ func (c *networkConfiguration) conflictsWithNetworks(id string, others []*bridge
 
 func (d *driver) configure(option map[string]interface{}) error {
 	var (
-		config         *configuration
-		err            error
-		natChain       *iptables.ChainInfo
-		filterChain    *iptables.ChainInfo
-		isolationChain *iptables.ChainInfo
+		config          *configuration
+		err             error
+		natChain        *iptables.ChainInfo
+		filterChain     *iptables.ChainInfo
+		isolationChain  *iptables.ChainInfo
+		filter6Chain    *iptables.ChainInfo
+		isolation6Chain *iptables.ChainInfo
 	)
 
 	genericData, ok := option[netlabel.GenericData]
@@ -386,12 +401,20 @@ func (d *driver) configure(option map[string]interface{}) error {
 		if err != nil {
 			return err
 		}
+
+		removeIPv6Chains()
+		filter6Chain, isolation6Chain, err = setupIPv6Chains(config)
+		if err != nil {
+			return err
+		}
 	}
 
 	d.Lock()
 	d.natChain = natChain
 	d.filterChain = filterChain
 	d.isolationChain = isolationChain
+	d.filter6Chain = filter6Chain
+	d.isolation6Chain = isolation6Chain
 	d.config = config
 	d.Unlock()
 
@@ -633,6 +656,7 @@ func (d *driver) createNetwork(config *networkConfiguration) error {
 
 	enableIPv6Forwarding := d.config.EnableIPForwarding && config.AddressIPv6 != nil
 	enableNDPProxying := config.NDPProxyInterface != "" && config.AddressIPv6 != nil
+	setupIPv6Tables := d.config.EnableIPTables && config.AddressIPv6 != nil
 
 	// Conditionally queue setup steps depending on configuration values.
 	for _, step := range []struct {
@@ -660,6 +684,9 @@ func (d *driver) createNetwork(config *networkConfiguration) error {
 
 		// Setup IPTables.
 		{d.config.EnableIPTables, network.setupIPTables},
+
+		// Setup IPTables.
+		{setupIPv6Tables, network.setupIPv6Tables},
 
 		//We want to track firewalld configuration so that
 		//if it is started/reloaded, the rules can be applied correctly

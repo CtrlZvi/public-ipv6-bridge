@@ -14,6 +14,8 @@ type IPV string
 const (
 	// Iptables point ipv4 table
 	Iptables IPV = "ipv4"
+	// IP6Tables point to ipv6 table
+	IP6Tables IPV = "ipv6"
 )
 const (
 	dbusInterface = "org.fedoraproject.FirewallD1"

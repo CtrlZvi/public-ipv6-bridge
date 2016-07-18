@@ -33,15 +33,19 @@ const (
 
 var (
 	iptablesPath  string
+	ip6tablesPath string
 	supportsXlock = false
 	// used to lock iptables commands if xtables lock is not supported
 	bestEffortLock sync.Mutex
 	// ErrIptablesNotFound is returned when the rule is not found.
 	ErrIptablesNotFound = errors.New("Iptables not found")
+	// ErrIP6tablesNotFound is returned when the rule is not found.
+	ErrIP6tablesNotFound = errors.New("IP6tables not found")
 )
 
 // ChainInfo defines the iptables chain.
 type ChainInfo struct {
+	IPV         IPV
 	Name        string
 	Table       Table
 	HairpinMode bool
@@ -67,12 +71,22 @@ func initCheck() error {
 		iptablesPath = path
 		supportsXlock = exec.Command(iptablesPath, "--wait", "-L", "-n").Run() == nil
 	}
+
+	if ip6tablesPath == "" {
+		path, err := exec.LookPath("ip6tables")
+		if err != nil {
+			return ErrIP6tablesNotFound
+		}
+		ip6tablesPath = path
+		supportsXlock = exec.Command(ip6tablesPath, "--wait", "-L", "-n").Run() == nil
+	}
 	return nil
 }
 
 // NewChain adds a new chain to ip table.
-func NewChain(name string, table Table, hairpinMode bool) (*ChainInfo, error) {
+func NewChain(ipv IPV, name string, table Table, hairpinMode bool) (*ChainInfo, error) {
 	c := &ChainInfo{
+		IPV:         ipv,
 		Name:        name,
 		Table:       table,
 		HairpinMode: hairpinMode,
@@ -82,8 +96,8 @@ func NewChain(name string, table Table, hairpinMode bool) (*ChainInfo, error) {
 	}
 
 	// Add chain if it doesn't exist
-	if _, err := Raw("-t", string(c.Table), "-n", "-L", c.Name); err != nil {
-		if output, err := Raw("-t", string(c.Table), "-N", c.Name); err != nil {
+	if _, err := Raw(ipv, "-t", string(c.Table), "-n", "-L", c.Name); err != nil {
+		if output, err := Raw(ipv, "-t", string(c.Table), "-N", c.Name); err != nil {
 			return nil, err
 		} else if len(output) != 0 {
 			return nil, fmt.Errorf("Could not create %s/%s chain: %s", c.Table, c.Name, output)
@@ -104,11 +118,11 @@ func ProgramChain(c *ChainInfo, bridgeName string, hairpinMode, enable bool) err
 			"-m", "addrtype",
 			"--dst-type", "LOCAL",
 			"-j", c.Name}
-		if !Exists(Nat, "PREROUTING", preroute...) && enable {
+		if !Exists(c.IPV, Nat, "PREROUTING", preroute...) && enable {
 			if err := c.Prerouting(Append, preroute...); err != nil {
 				return fmt.Errorf("Failed to inject docker in PREROUTING chain: %s", err)
 			}
-		} else if Exists(Nat, "PREROUTING", preroute...) && !enable {
+		} else if Exists(c.IPV, Nat, "PREROUTING", preroute...) && !enable {
 			if err := c.Prerouting(Delete, preroute...); err != nil {
 				return fmt.Errorf("Failed to remove docker in PREROUTING chain: %s", err)
 			}
@@ -120,11 +134,11 @@ func ProgramChain(c *ChainInfo, bridgeName string, hairpinMode, enable bool) err
 		if !hairpinMode {
 			output = append(output, "!", "--dst", "127.0.0.0/8")
 		}
-		if !Exists(Nat, "OUTPUT", output...) && enable {
+		if !Exists(c.IPV, Nat, "OUTPUT", output...) && enable {
 			if err := c.Output(Append, output...); err != nil {
 				return fmt.Errorf("Failed to inject docker in OUTPUT chain: %s", err)
 			}
-		} else if Exists(Nat, "OUTPUT", output...) && !enable {
+		} else if Exists(c.IPV, Nat, "OUTPUT", output...) && !enable {
 			if err := c.Output(Delete, output...); err != nil {
 				return fmt.Errorf("Failed to inject docker in OUTPUT chain: %s", err)
 			}
@@ -137,16 +151,16 @@ func ProgramChain(c *ChainInfo, bridgeName string, hairpinMode, enable bool) err
 		link := []string{
 			"-o", bridgeName,
 			"-j", c.Name}
-		if !Exists(Filter, "FORWARD", link...) && enable {
+		if !Exists(c.IPV, Filter, "FORWARD", link...) && enable {
 			insert := append([]string{string(Insert), "FORWARD"}, link...)
-			if output, err := Raw(insert...); err != nil {
+			if output, err := Raw(c.IPV, insert...); err != nil {
 				return err
 			} else if len(output) != 0 {
 				return fmt.Errorf("Could not create linking rule to %s/%s: %s", c.Table, c.Name, output)
 			}
-		} else if Exists(Filter, "FORWARD", link...) && !enable {
+		} else if Exists(c.IPV, Filter, "FORWARD", link...) && !enable {
 			del := append([]string{string(Delete), "FORWARD"}, link...)
-			if output, err := Raw(del...); err != nil {
+			if output, err := Raw(c.IPV, del...); err != nil {
 				return err
 			} else if len(output) != 0 {
 				return fmt.Errorf("Could not delete linking rule from %s/%s: %s", c.Table, c.Name, output)
@@ -158,8 +172,9 @@ func ProgramChain(c *ChainInfo, bridgeName string, hairpinMode, enable bool) err
 }
 
 // RemoveExistingChain removes existing chain from the table.
-func RemoveExistingChain(name string, table Table) error {
+func RemoveExistingChain(ipv IPV, name string, table Table) error {
 	c := &ChainInfo{
+		IPV:   ipv,
 		Name:  name,
 		Table: table,
 	}
@@ -187,13 +202,13 @@ func (c *ChainInfo) Forward(action Action, ip net.IP, port int, proto, destAddr 
 	if !c.HairpinMode {
 		args = append(args, "!", "-i", bridgeName)
 	}
-	if output, err := Raw(args...); err != nil {
+	if output, err := Raw(c.IPV, args...); err != nil {
 		return err
 	} else if len(output) != 0 {
 		return ChainError{Chain: "FORWARD", Output: output}
 	}
 
-	if output, err := Raw("-t", string(Filter), string(action), c.Name,
+	if output, err := Raw(c.IPV, "-t", string(Filter), string(action), c.Name,
 		"!", "-i", bridgeName,
 		"-o", bridgeName,
 		"-p", proto,
@@ -205,7 +220,7 @@ func (c *ChainInfo) Forward(action Action, ip net.IP, port int, proto, destAddr 
 		return ChainError{Chain: "FORWARD", Output: output}
 	}
 
-	if output, err := Raw("-t", string(Nat), string(action), "POSTROUTING",
+	if output, err := Raw(c.IPV, "-t", string(Nat), string(action), "POSTROUTING",
 		"-p", proto,
 		"-s", destAddr,
 		"-d", destAddr,
@@ -222,7 +237,7 @@ func (c *ChainInfo) Forward(action Action, ip net.IP, port int, proto, destAddr 
 // Link adds reciprocal ACCEPT rule for two supplied IP addresses.
 // Traffic is allowed from ip1 to ip2 and vice-versa
 func (c *ChainInfo) Link(action Action, ip1, ip2 net.IP, port int, proto string, bridgeName string) error {
-	if output, err := Raw("-t", string(Filter), string(action), c.Name,
+	if output, err := Raw(c.IPV, "-t", string(Filter), string(action), c.Name,
 		"-i", bridgeName, "-o", bridgeName,
 		"-p", proto,
 		"-s", ip1.String(),
@@ -233,7 +248,7 @@ func (c *ChainInfo) Link(action Action, ip1, ip2 net.IP, port int, proto string,
 	} else if len(output) != 0 {
 		return fmt.Errorf("Error iptables forward: %s", output)
 	}
-	if output, err := Raw("-t", string(Filter), string(action), c.Name,
+	if output, err := Raw(c.IPV, "-t", string(Filter), string(action), c.Name,
 		"-i", bridgeName, "-o", bridgeName,
 		"-p", proto,
 		"-s", ip2.String(),
@@ -253,7 +268,7 @@ func (c *ChainInfo) Prerouting(action Action, args ...string) error {
 	if len(args) > 0 {
 		a = append(a, args...)
 	}
-	if output, err := Raw(a...); err != nil {
+	if output, err := Raw(c.IPV, a...); err != nil {
 		return err
 	} else if len(output) != 0 {
 		return ChainError{Chain: "PREROUTING", Output: output}
@@ -267,7 +282,7 @@ func (c *ChainInfo) Output(action Action, args ...string) error {
 	if len(args) > 0 {
 		a = append(a, args...)
 	}
-	if output, err := Raw(a...); err != nil {
+	if output, err := Raw(c.IPV, a...); err != nil {
 		return err
 	} else if len(output) != 0 {
 		return ChainError{Chain: "OUTPUT", Output: output}
@@ -286,13 +301,13 @@ func (c *ChainInfo) Remove() error {
 		c.Prerouting(Delete)
 		c.Output(Delete)
 	}
-	Raw("-t", string(c.Table), "-F", c.Name)
-	Raw("-t", string(c.Table), "-X", c.Name)
+	Raw(c.IPV, "-t", string(c.Table), "-F", c.Name)
+	Raw(c.IPV, "-t", string(c.Table), "-X", c.Name)
 	return nil
 }
 
 // Exists checks if a rule exists
-func Exists(table Table, chain string, rule ...string) bool {
+func Exists(ipv IPV, table Table, chain string, rule ...string) bool {
 	if string(table) == "" {
 		table = Filter
 	}
@@ -302,7 +317,7 @@ func Exists(table Table, chain string, rule ...string) bool {
 
 	// try -C
 	// if exit status is 0 then return true, the rule exists
-	if _, err := Raw(append([]string{
+	if _, err := Raw(ipv, append([]string{
 		"-t", string(table), "-C", chain}, rule...)...); err == nil {
 		return true
 	}
@@ -317,17 +332,17 @@ func Exists(table Table, chain string, rule ...string) bool {
 }
 
 // Raw calls 'iptables' system command, passing supplied arguments.
-func Raw(args ...string) ([]byte, error) {
+func Raw(ipv IPV, args ...string) ([]byte, error) {
 	if firewalldRunning {
-		output, err := Passthrough(Iptables, args...)
+		output, err := Passthrough(ipv, args...)
 		if err == nil || !strings.Contains(err.Error(), "was not provided by any .service files") {
 			return output, err
 		}
 	}
-	return raw(args...)
+	return raw(ipv, args...)
 }
 
-func raw(args ...string) ([]byte, error) {
+func raw(ipv IPV, args ...string) ([]byte, error) {
 	if err := initCheck(); err != nil {
 		return nil, err
 	}
@@ -338,11 +353,23 @@ func raw(args ...string) ([]byte, error) {
 		defer bestEffortLock.Unlock()
 	}
 
-	logrus.Debugf("%s, %v", iptablesPath, args)
+	var output []byte
+	var err error
+	switch ipv {
+	case Iptables:
+		logrus.Debugf("%s, %v", iptablesPath, args)
 
-	output, err := exec.Command(iptablesPath, args...).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("iptables failed: iptables %v: %s (%s)", strings.Join(args, " "), output, err)
+		output, err = exec.Command(iptablesPath, args...).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("iptables failed: iptables %v: %s (%s)", strings.Join(args, " "), output, err)
+		}
+	case IP6Tables:
+		logrus.Debugf("%s, %v", ip6tablesPath, args)
+
+		output, err = exec.Command(ip6tablesPath, args...).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("ip6tables failed: ip6tables %v: %s (%s)", strings.Join(args, " "), output, err)
+		}
 	}
 
 	// ignore iptables' message about xtables lock
@@ -355,8 +382,8 @@ func raw(args ...string) ([]byte, error) {
 
 // RawCombinedOutput inernally calls the Raw function and returns a non nil
 // error if Raw returned a non nil error or a non empty output
-func RawCombinedOutput(args ...string) error {
-	if output, err := Raw(args...); err != nil || len(output) != 0 {
+func RawCombinedOutput(ipv IPV, args ...string) error {
+	if output, err := Raw(ipv, args...); err != nil || len(output) != 0 {
 		return fmt.Errorf("%s (%v)", string(output), err)
 	}
 	return nil

@@ -23,40 +23,70 @@ func setupIPChains(config *configuration) (*iptables.ChainInfo, *iptables.ChainI
 
 	hairpinMode := !config.EnableUserlandProxy
 
-	natChain, err := iptables.NewChain(DockerChain, iptables.Nat, hairpinMode)
+	natChain, err := iptables.NewChain(iptables.Iptables, DockerChain, iptables.Nat, hairpinMode)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create NAT chain: %v", err)
 	}
 	defer func() {
 		if err != nil {
-			if err := iptables.RemoveExistingChain(DockerChain, iptables.Nat); err != nil {
+			if err := iptables.RemoveExistingChain(iptables.Iptables, DockerChain, iptables.Nat); err != nil {
 				logrus.Warnf("failed on removing iptables NAT chain on cleanup: %v", err)
 			}
 		}
 	}()
 
-	filterChain, err := iptables.NewChain(DockerChain, iptables.Filter, false)
+	filterChain, err := iptables.NewChain(iptables.Iptables, DockerChain, iptables.Filter, false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create FILTER chain: %v", err)
 	}
 	defer func() {
 		if err != nil {
-			if err := iptables.RemoveExistingChain(DockerChain, iptables.Filter); err != nil {
+			if err := iptables.RemoveExistingChain(iptables.Iptables, DockerChain, iptables.Filter); err != nil {
 				logrus.Warnf("failed on removing iptables FILTER chain on cleanup: %v", err)
 			}
 		}
 	}()
 
-	isolationChain, err := iptables.NewChain(IsolationChain, iptables.Filter, false)
+	isolationChain, err := iptables.NewChain(iptables.Iptables, IsolationChain, iptables.Filter, false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create FILTER isolation chain: %v", err)
 	}
 
-	if err := addReturnRule(IsolationChain); err != nil {
+	if err := addReturnRule(iptables.Iptables, IsolationChain); err != nil {
 		return nil, nil, nil, err
 	}
 
 	return natChain, filterChain, isolationChain, nil
+}
+
+func setupIPv6Chains(config *configuration) (*iptables.ChainInfo, *iptables.ChainInfo, error) {
+	// Sanity check.
+	if config.EnableIPTables == false {
+		return nil, nil, fmt.Errorf("cannot create new chains, EnableIPTable is disabled")
+	}
+
+	filterChain, err := iptables.NewChain(iptables.IP6Tables, DockerChain, iptables.Filter, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create FILTER chain: %v", err)
+	}
+	defer func() {
+		if err != nil {
+			if err := iptables.RemoveExistingChain(iptables.IP6Tables, DockerChain, iptables.Filter); err != nil {
+				logrus.Warnf("failed on removing iptables FILTER chain on cleanup: %v", err)
+			}
+		}
+	}()
+
+	isolationChain, err := iptables.NewChain(iptables.IP6Tables, IsolationChain, iptables.Filter, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create FILTER isolation chain: %v", err)
+	}
+
+	if err := addReturnRule(iptables.IP6Tables, IsolationChain); err != nil {
+		return nil, nil, err
+	}
+
+	return filterChain, isolationChain, nil
 }
 
 func (n *bridgeNetwork) setupIPTables(config *networkConfiguration, i *bridgeInterface) error {
@@ -118,7 +148,46 @@ func (n *bridgeNetwork) setupIPTables(config *networkConfiguration, i *bridgeInt
 		n.portMapper.SetIptablesChain(natChain, n.getNetworkBridgeName())
 	}
 
-	if err := ensureJumpRule("FORWARD", IsolationChain); err != nil {
+	if err := ensureJumpRule(iptables.Iptables, "FORWARD", IsolationChain); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (n *bridgeNetwork) setupIPv6Tables(config *networkConfiguration, i *bridgeInterface) error {
+	d := n.driver
+	d.Lock()
+	driverConfig := d.config
+	d.Unlock()
+
+	// Sanity check.
+	if driverConfig.EnableIPTables == false {
+		return fmt.Errorf("Cannot program chains, EnableIPTable is disabled")
+	}
+
+	// Pickup this configuraton option from driver
+	hairpinMode := !driverConfig.EnableUserlandProxy
+
+	if config.Internal {
+		return fmt.Errorf("Internal IPv6 network not supported by public IPv6 bridge")
+	} else {
+		filterChain, _, err := n.getDriver6Chains()
+		if err != nil {
+			return fmt.Errorf("Failed to setup IP tables, cannot acquire chain info %s", err.Error())
+		}
+
+		err = iptables.ProgramChain(filterChain, config.BridgeName, hairpinMode, true)
+		if err != nil {
+			return fmt.Errorf("Failed to program FILTER chain: %s", err.Error())
+		}
+
+		n.registerIptCleanFunc(func() error {
+			return iptables.ProgramChain(filterChain, config.BridgeName, hairpinMode, false)
+		})
+	}
+
+	if err := ensureJumpRule(iptables.IP6Tables, "FORWARD", IsolationChain); err != nil {
 		return err
 	}
 
@@ -126,6 +195,7 @@ func (n *bridgeNetwork) setupIPTables(config *networkConfiguration, i *bridgeInt
 }
 
 type iptRule struct {
+	ipv     iptables.IPV
 	table   iptables.Table
 	chain   string
 	preArgs []string
@@ -136,11 +206,11 @@ func setupIPTablesInternal(bridgeIface string, addr net.Addr, icc, ipmasq, hairp
 
 	var (
 		address   = addr.String()
-		natRule   = iptRule{table: iptables.Nat, chain: "POSTROUTING", preArgs: []string{"-t", "nat"}, args: []string{"-s", address, "!", "-o", bridgeIface, "-j", "MASQUERADE"}}
-		hpNatRule = iptRule{table: iptables.Nat, chain: "POSTROUTING", preArgs: []string{"-t", "nat"}, args: []string{"-m", "addrtype", "--src-type", "LOCAL", "-o", bridgeIface, "-j", "MASQUERADE"}}
-		skipDNAT  = iptRule{table: iptables.Nat, chain: DockerChain, preArgs: []string{"-t", "nat"}, args: []string{"-i", bridgeIface, "-j", "RETURN"}}
-		outRule   = iptRule{table: iptables.Filter, chain: "FORWARD", args: []string{"-i", bridgeIface, "!", "-o", bridgeIface, "-j", "ACCEPT"}}
-		inRule    = iptRule{table: iptables.Filter, chain: "FORWARD", args: []string{"-o", bridgeIface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"}}
+		natRule   = iptRule{ipv: iptables.Iptables, table: iptables.Nat, chain: "POSTROUTING", preArgs: []string{"-t", "nat"}, args: []string{"-s", address, "!", "-o", bridgeIface, "-j", "MASQUERADE"}}
+		hpNatRule = iptRule{ipv: iptables.Iptables, table: iptables.Nat, chain: "POSTROUTING", preArgs: []string{"-t", "nat"}, args: []string{"-m", "addrtype", "--src-type", "LOCAL", "-o", bridgeIface, "-j", "MASQUERADE"}}
+		skipDNAT  = iptRule{ipv: iptables.Iptables, table: iptables.Nat, chain: DockerChain, preArgs: []string{"-t", "nat"}, args: []string{"-i", bridgeIface, "-j", "RETURN"}}
+		outRule   = iptRule{ipv: iptables.Iptables, table: iptables.Filter, chain: "FORWARD", args: []string{"-i", bridgeIface, "!", "-o", bridgeIface, "-j", "ACCEPT"}}
+		inRule    = iptRule{ipv: iptables.Iptables, table: iptables.Filter, chain: "FORWARD", args: []string{"-o", bridgeIface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"}}
 	)
 
 	// Set NAT.
@@ -186,7 +256,7 @@ func programChainRule(rule iptRule, ruleDescr string, insert bool) error {
 		prefix    []string
 		operation string
 		condition bool
-		doesExist = iptables.Exists(rule.table, rule.chain, rule.args...)
+		doesExist = iptables.Exists(rule.ipv, rule.table, rule.chain, rule.args...)
 	)
 
 	if insert {
@@ -203,7 +273,7 @@ func programChainRule(rule iptRule, ruleDescr string, insert bool) error {
 	}
 
 	if condition {
-		if err := iptables.RawCombinedOutput(append(prefix, rule.args...)...); err != nil {
+		if err := iptables.RawCombinedOutput(rule.ipv, append(prefix, rule.args...)...); err != nil {
 			return fmt.Errorf("Unable to %s %s rule: %s", operation, ruleDescr, err.Error())
 		}
 	}
@@ -222,18 +292,18 @@ func setIcc(bridgeIface string, iccEnable, insert bool) error {
 
 	if insert {
 		if !iccEnable {
-			iptables.Raw(append([]string{"-D", chain}, acceptArgs...)...)
+			iptables.Raw(iptables.Iptables, append([]string{"-D", chain}, acceptArgs...)...)
 
-			if !iptables.Exists(table, chain, dropArgs...) {
-				if err := iptables.RawCombinedOutput(append([]string{"-A", chain}, dropArgs...)...); err != nil {
+			if !iptables.Exists(iptables.Iptables, table, chain, dropArgs...) {
+				if err := iptables.RawCombinedOutput(iptables.Iptables, append([]string{"-A", chain}, dropArgs...)...); err != nil {
 					return fmt.Errorf("Unable to prevent intercontainer communication: %s", err.Error())
 				}
 			}
 		} else {
-			iptables.Raw(append([]string{"-D", chain}, dropArgs...)...)
+			iptables.Raw(iptables.Iptables, append([]string{"-D", chain}, dropArgs...)...)
 
-			if !iptables.Exists(table, chain, acceptArgs...) {
-				if err := iptables.RawCombinedOutput(append([]string{"-I", chain}, acceptArgs...)...); err != nil {
+			if !iptables.Exists(iptables.Iptables, table, chain, acceptArgs...) {
+				if err := iptables.RawCombinedOutput(iptables.Iptables, append([]string{"-I", chain}, acceptArgs...)...); err != nil {
 					return fmt.Errorf("Unable to allow intercontainer communication: %s", err.Error())
 				}
 			}
@@ -241,12 +311,12 @@ func setIcc(bridgeIface string, iccEnable, insert bool) error {
 	} else {
 		// Remove any ICC rule.
 		if !iccEnable {
-			if iptables.Exists(table, chain, dropArgs...) {
-				iptables.Raw(append([]string{"-D", chain}, dropArgs...)...)
+			if iptables.Exists(iptables.Iptables, table, chain, dropArgs...) {
+				iptables.Raw(iptables.Iptables, append([]string{"-D", chain}, dropArgs...)...)
 			}
 		} else {
-			if iptables.Exists(table, chain, acceptArgs...) {
-				iptables.Raw(append([]string{"-D", chain}, acceptArgs...)...)
+			if iptables.Exists(iptables.Iptables, table, chain, acceptArgs...) {
+				iptables.Raw(iptables.Iptables, append([]string{"-D", chain}, acceptArgs...)...)
 			}
 		}
 	}
@@ -264,19 +334,19 @@ func setINC(iface1, iface2 string, enable bool) error {
 
 	if enable {
 		for i := 0; i < 2; i++ {
-			if iptables.Exists(table, chain, args[i]...) {
+			if iptables.Exists(iptables.Iptables, table, chain, args[i]...) {
 				continue
 			}
-			if err := iptables.RawCombinedOutput(append([]string{"-I", chain}, args[i]...)...); err != nil {
+			if err := iptables.RawCombinedOutput(iptables.Iptables, append([]string{"-I", chain}, args[i]...)...); err != nil {
 				return fmt.Errorf("unable to add inter-network communication rule: %v", err)
 			}
 		}
 	} else {
 		for i := 0; i < 2; i++ {
-			if !iptables.Exists(table, chain, args[i]...) {
+			if !iptables.Exists(iptables.Iptables, table, chain, args[i]...) {
 				continue
 			}
-			if err := iptables.RawCombinedOutput(append([]string{"-D", chain}, args[i]...)...); err != nil {
+			if err := iptables.RawCombinedOutput(iptables.Iptables, append([]string{"-D", chain}, args[i]...)...); err != nil {
 				return fmt.Errorf("unable to remove inter-network communication rule: %v", err)
 			}
 		}
@@ -285,17 +355,17 @@ func setINC(iface1, iface2 string, enable bool) error {
 	return nil
 }
 
-func addReturnRule(chain string) error {
+func addReturnRule(ipv iptables.IPV, chain string) error {
 	var (
 		table = iptables.Filter
 		args  = []string{"-j", "RETURN"}
 	)
 
-	if iptables.Exists(table, chain, args...) {
+	if iptables.Exists(ipv, table, chain, args...) {
 		return nil
 	}
 
-	err := iptables.RawCombinedOutput(append([]string{"-I", chain}, args...)...)
+	err := iptables.RawCombinedOutput(ipv, append([]string{"-I", chain}, args...)...)
 	if err != nil {
 		return fmt.Errorf("unable to add return rule in %s chain: %s", chain, err.Error())
 	}
@@ -304,20 +374,20 @@ func addReturnRule(chain string) error {
 }
 
 // Ensure the jump rule is on top
-func ensureJumpRule(fromChain, toChain string) error {
+func ensureJumpRule(ipv iptables.IPV, fromChain, toChain string) error {
 	var (
 		table = iptables.Filter
 		args  = []string{"-j", toChain}
 	)
 
-	if iptables.Exists(table, fromChain, args...) {
-		err := iptables.RawCombinedOutput(append([]string{"-D", fromChain}, args...)...)
+	if iptables.Exists(ipv, table, fromChain, args...) {
+		err := iptables.RawCombinedOutput(ipv, append([]string{"-D", fromChain}, args...)...)
 		if err != nil {
 			return fmt.Errorf("unable to remove jump to %s rule in %s chain: %s", toChain, fromChain, err.Error())
 		}
 	}
 
-	err := iptables.RawCombinedOutput(append([]string{"-I", fromChain}, args...)...)
+	err := iptables.RawCombinedOutput(ipv, append([]string{"-I", fromChain}, args...)...)
 	if err != nil {
 		return fmt.Errorf("unable to insert jump to %s rule in %s chain: %s", toChain, fromChain, err.Error())
 	}
@@ -327,9 +397,20 @@ func ensureJumpRule(fromChain, toChain string) error {
 
 func removeIPChains() {
 	for _, chainInfo := range []iptables.ChainInfo{
-		{Name: DockerChain, Table: iptables.Nat},
-		{Name: DockerChain, Table: iptables.Filter},
-		{Name: IsolationChain, Table: iptables.Filter},
+		{IPV: iptables.Iptables, Name: DockerChain, Table: iptables.Nat},
+		{IPV: iptables.Iptables, Name: DockerChain, Table: iptables.Filter},
+		{IPV: iptables.Iptables, Name: IsolationChain, Table: iptables.Filter},
+	} {
+		if err := chainInfo.Remove(); err != nil {
+			logrus.Warnf("Failed to remove existing iptables entries in table %s chain %s : %v", chainInfo.Table, chainInfo.Name, err)
+		}
+	}
+}
+
+func removeIPv6Chains() {
+	for _, chainInfo := range []iptables.ChainInfo{
+		{IPV: iptables.IP6Tables, Name: DockerChain, Table: iptables.Filter},
+		{IPV: iptables.IP6Tables, Name: IsolationChain, Table: iptables.Filter},
 	} {
 		if err := chainInfo.Remove(); err != nil {
 			logrus.Warnf("Failed to remove existing iptables entries in table %s chain %s : %v", chainInfo.Table, chainInfo.Name, err)
